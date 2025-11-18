@@ -4,6 +4,7 @@ import (
 	"crypto/mlkem"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -245,4 +246,56 @@ func TestCertificateVerification(t *testing.T) {
 	if !valid {
 		t.Fatal("Signature verification failed")
 	}
+}
+
+func ExampleListenSecureConnections() {
+	// Create server certificate
+	subject := pkix.Name{CommonName: "server.example.com"}
+	issuer := pkix.Name{CommonName: "CA"}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	serverCert, _ := NewMLDSAPrivateCertificate(subject, issuer, notBefore, notAfter)
+
+	// Start listening for secure connections
+	listener, _ := ListenSecureConnections("localhost:8080", serverCert)
+	defer listener.Close()
+
+	// Accept a connection (handshake happens automatically)
+	conn, _ := listener.Accept()
+	defer conn.Close()
+
+	// Receive encrypted message
+	data, _ := conn.Receive()
+	fmt.Printf("Received: %s\n", string(data))
+
+	// Send encrypted response
+	conn.Send([]byte("Hello from server"))
+
+	// Output:
+	// Received: Hello from client
+}
+
+func ExampleDialSecureConnection() {
+	// Create client certificate
+	subject := pkix.Name{CommonName: "client.example.com"}
+	issuer := pkix.Name{CommonName: "CA"}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	clientCert, _ := NewMLDSAPrivateCertificate(subject, issuer, notBefore, notAfter)
+
+	// Connect to server (handshake happens automatically)
+	conn, _ := DialSecureConnection("localhost:8080", clientCert)
+	defer conn.Close()
+
+	// Send encrypted message
+	conn.Send([]byte("Hello from client"))
+
+	// Receive encrypted response
+	response, _ := conn.Receive()
+	fmt.Printf("Received: %s\n", string(response))
+
+	// Output:
+	// Received: Hello from server
 }
