@@ -3,6 +3,7 @@ package clustering
 import (
 	"crypto/rand"
 	"crypto/x509/pkix"
+	"fmt"
 	"testing"
 	"time"
 
@@ -216,4 +217,85 @@ func TestVerifyWithKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("Verification should fail with wrong key")
 	}
+}
+
+func Example() {
+	// Root CA 생성
+	rootSubject := pkix.Name{CommonName: "Root CA", Organization: []string{"Example Corp"}}
+	rootIssuer := pkix.Name{CommonName: "Root CA", Organization: []string{"Example Corp"}}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	rootPrivCert, err := NewMLDSAPrivateCertificate(rootSubject, rootIssuer, notBefore, notAfter)
+	if err != nil {
+		panic(err)
+	}
+	rootPubCert := rootPrivCert.PublicCert()
+	rootPubKey := rootPubCert.GetPublicKey()
+
+	// Root CA 검증 (self-verification)
+	err = rootPubCert.Verify()
+	if err != nil {
+		panic("Root CA verification failed")
+	}
+
+	// Intermediate CA 생성 (Root CA로 서명)
+	interSubject := pkix.Name{CommonName: "Intermediate CA", Organization: []string{"Example Corp"}}
+	interIssuer := rootSubject // Issuer는 Root CA
+
+	interPrivCert, err := NewMLDSAPrivateCertificate(interSubject, interIssuer, notBefore, notAfter)
+	if err != nil {
+		panic(err)
+	}
+	interPubCert, err := NewMLDSAPublicCertificateFromPublicKey(
+		interSubject, interIssuer, notBefore, notAfter,
+		interPrivCert.PublicCert().GetPublicKey(), rootPrivCert.PrivateKey,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// Intermediate CA 검증 (Root CA의 공개키로)
+	err = interPubCert.VerifyWithKey(rootPubKey)
+	if err != nil {
+		panic("Intermediate CA verification failed")
+	}
+
+	// Personal Certificate 생성 (Intermediate CA로 서명)
+	personalSubject := pkix.Name{CommonName: "user@example.com", Organization: []string{"Example Corp"}}
+	personalIssuer := interSubject // Issuer는 Intermediate CA
+
+	personalPrivCert, err := NewMLDSAPrivateCertificate(personalSubject, personalIssuer, notBefore, notAfter)
+	if err != nil {
+		panic(err)
+	}
+	personalPubCert, err := NewMLDSAPublicCertificateFromPublicKey(
+		personalSubject, personalIssuer, notBefore, notAfter,
+		personalPrivCert.PublicCert().GetPublicKey(), interPrivCert.PrivateKey,
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// Personal Certificate 검증 (Intermediate CA의 공개키로)
+	interPubKey := interPubCert.GetPublicKey()
+	err = personalPubCert.VerifyWithKey(interPubKey)
+	if err != nil {
+		panic("Personal certificate verification failed")
+	}
+
+	// 데이터 서명 및 검증 예시
+	data := []byte("Hello, secure world!")
+	signature, err := personalPrivCert.SignData(data)
+	if err != nil {
+		panic("Signing failed")
+	}
+
+	valid := personalPubCert.VerifyData(data, signature)
+	if !valid {
+		panic("Verification failed")
+	}
+
+	fmt.Println("Certificate chain created and verified successfully")
+	// Output: Certificate chain created and verified successfully
 }
