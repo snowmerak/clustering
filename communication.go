@@ -145,7 +145,7 @@ func (sc *SecureConnection) clientKeyExchange() error {
 	}
 
 	// Encapsulate shared secret using server's public key
-	ciphertext, sharedSecret := pubKey.Encapsulate()
+	sharedSecret, ciphertext := pubKey.Encapsulate()
 
 	// Send ciphertext to server
 	if err := sc.sendMessage(ciphertext); err != nil {
