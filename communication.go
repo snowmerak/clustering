@@ -12,8 +12,8 @@ import (
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"github.com/xtaci/kcp-go/v5"
-	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/chacha20poly1305"
+	"lukechampine.com/blake3"
 )
 
 // SecureConnection represents a secure connection using KCP with ML-DSA certificates and ML-KEM key exchange
@@ -159,10 +159,7 @@ func (sc *SecureConnection) clientKeyExchange() error {
 	}
 
 	// Verify server's signature
-	hash, err := blake2b.New256(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create hash: %w", err)
-	}
+	hash := blake3.New(32, nil)
 	hash.Write(sharedSecret)
 	digest := hash.Sum(nil)
 
@@ -204,10 +201,7 @@ func (sc *SecureConnection) serverKeyExchange() error {
 	}
 
 	// Sign the shared secret hash
-	hash, err := blake2b.New256(nil)
-	if err != nil {
-		return fmt.Errorf("failed to create hash: %w", err)
-	}
+	hash := blake3.New(32, nil)
 	hash.Write(sharedSecret)
 	digest := hash.Sum(nil)
 
@@ -230,8 +224,8 @@ func (sc *SecureConnection) serverKeyExchange() error {
 
 // deriveKeys derives encryption and MAC keys from the shared secret
 func (sc *SecureConnection) deriveKeys() {
-	// Use BLAKE2b-256 to derive XChaCha20-Poly1305 key (32 bytes)
-	hash, _ := blake2b.New256(nil)
+	// Use BLAKE3 to derive XChaCha20-Poly1305 key (32 bytes)
+	hash := blake3.New(32, nil)
 	hash.Write(sc.sharedKey)
 	key := hash.Sum(nil)
 
