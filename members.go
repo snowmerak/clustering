@@ -67,6 +67,7 @@ func (m *Member) GetSortKey() string {
 // MemberStore manages members stored as sorted CSV.
 type MemberStore struct {
 	members []*Member
+	vnodes  []virtualNode // cached virtual nodes for consistent hashing
 }
 
 // NewMemberStore creates a new member store.
@@ -80,6 +81,7 @@ func NewMemberStore() *MemberStore {
 func (ms *MemberStore) AddMember(member *Member) {
 	ms.members = append(ms.members, member)
 	ms.sortMembers()
+	ms.rebuildVirtualNodes()
 }
 
 // GetMember retrieves a member by its hash key.
@@ -90,6 +92,18 @@ func (ms *MemberStore) GetMember(hashKey string) (*Member, bool) {
 		}
 	}
 	return nil, false
+}
+
+// RemoveMember removes a member from the store and rebuilds virtual nodes.
+func (ms *MemberStore) RemoveMember(hashKey string) bool {
+	for i, member := range ms.members {
+		if member.hashKey == hashKey {
+			ms.members = append(ms.members[:i], ms.members[i+1:]...)
+			ms.rebuildVirtualNodes()
+			return true
+		}
+	}
+	return false
 }
 
 // GetAllMembers returns all members (already sorted).
@@ -207,6 +221,7 @@ func (ms *MemberStore) LoadFromCSV(reader io.Reader) error {
 
 	// Ensure sorted
 	ms.sortMembers()
+	ms.rebuildVirtualNodes()
 	return nil
 }
 
@@ -249,22 +264,16 @@ type virtualNode struct {
 	member *Member
 }
 
-// GetMemberByHash finds the appropriate member for the given data using consistent hashing with xxh3.
-// Members with higher weights get more virtual nodes, resulting in more data being assigned to them.
-func (ms *MemberStore) GetMemberByHash(data []byte) *Member {
-	if len(ms.members) == 0 {
-		return nil
-	}
-
-	// Create virtual nodes based on member weights
-	var vnodes []virtualNode
+// rebuildVirtualNodes rebuilds the virtual nodes list based on current members.
+func (ms *MemberStore) rebuildVirtualNodes() {
+	ms.vnodes = nil
 	for _, member := range ms.members {
 		// Create virtual nodes proportional to weight
 		for i := 0; i < member.Weight; i++ {
 			// Combine member hash key with virtual node index
 			vkey := fmt.Sprintf("%s#%d", member.hashKey, i)
 			hash := xxh3.HashString(vkey)
-			vnodes = append(vnodes, virtualNode{
+			ms.vnodes = append(ms.vnodes, virtualNode{
 				hash:   hash,
 				member: member,
 			})
@@ -272,59 +281,49 @@ func (ms *MemberStore) GetMemberByHash(data []byte) *Member {
 	}
 
 	// Sort virtual nodes by hash
-	sort.Slice(vnodes, func(i, j int) bool {
-		return vnodes[i].hash < vnodes[j].hash
+	sort.Slice(ms.vnodes, func(i, j int) bool {
+		return ms.vnodes[i].hash < ms.vnodes[j].hash
 	})
+}
+
+// GetMemberByHash finds the appropriate member for the given data using consistent hashing with xxh3.
+// Members with higher weights get more virtual nodes, resulting in more data being assigned to them.
+func (ms *MemberStore) GetMemberByHash(data []byte) *Member {
+	if len(ms.vnodes) == 0 {
+		return nil
+	}
 
 	// Hash the input data
 	dataHash := xxh3.Hash(data)
 
 	// Find the first virtual node with hash >= dataHash (binary search)
-	idx := sort.Search(len(vnodes), func(i int) bool {
-		return vnodes[i].hash >= dataHash
+	idx := sort.Search(len(ms.vnodes), func(i int) bool {
+		return ms.vnodes[i].hash >= dataHash
 	})
 
 	// If no node found, wrap around to the first node
-	if idx == len(vnodes) {
+	if idx == len(ms.vnodes) {
 		idx = 0
 	}
 
-	return vnodes[idx].member
+	return ms.vnodes[idx].member
 }
 
 // GetMembersByHashWithReplicas finds N members for the given data using consistent hashing.
 // This is useful for replication scenarios where data should be stored on multiple nodes.
 func (ms *MemberStore) GetMembersByHashWithReplicas(data []byte, replicas int) []*Member {
-	if len(ms.members) == 0 || replicas <= 0 {
+	if len(ms.vnodes) == 0 || replicas <= 0 {
 		return nil
 	}
-
-	// Create virtual nodes based on member weights
-	var vnodes []virtualNode
-	for _, member := range ms.members {
-		for i := 0; i < member.Weight; i++ {
-			vkey := fmt.Sprintf("%s#%d", member.hashKey, i)
-			hash := xxh3.HashString(vkey)
-			vnodes = append(vnodes, virtualNode{
-				hash:   hash,
-				member: member,
-			})
-		}
-	}
-
-	// Sort virtual nodes by hash
-	sort.Slice(vnodes, func(i, j int) bool {
-		return vnodes[i].hash < vnodes[j].hash
-	})
 
 	// Hash the input data
 	dataHash := xxh3.Hash(data)
 
 	// Find the first virtual node with hash >= dataHash
-	idx := sort.Search(len(vnodes), func(i int) bool {
-		return vnodes[i].hash >= dataHash
+	idx := sort.Search(len(ms.vnodes), func(i int) bool {
+		return ms.vnodes[i].hash >= dataHash
 	})
-	if idx == len(vnodes) {
+	if idx == len(ms.vnodes) {
 		idx = 0
 	}
 
@@ -333,12 +332,12 @@ func (ms *MemberStore) GetMembersByHashWithReplicas(data []byte, replicas int) [
 	seen := make(map[string]bool)
 
 	for len(result) < replicas && len(seen) < len(ms.members) {
-		vnode := vnodes[idx]
+		vnode := ms.vnodes[idx]
 		if !seen[vnode.member.hashKey] {
 			result = append(result, vnode.member)
 			seen[vnode.member.hashKey] = true
 		}
-		idx = (idx + 1) % len(vnodes)
+		idx = (idx + 1) % len(ms.vnodes)
 	}
 
 	return result

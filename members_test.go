@@ -134,6 +134,94 @@ func TestSaveLoadCSV(t *testing.T) {
 	}
 }
 
+func TestRemoveMember(t *testing.T) {
+	store := NewMemberStore()
+
+	// Create certificates
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	cert1, err := NewMLDSAPrivateCertificate(
+		pkix.Name{CommonName: "Member1"},
+		pkix.Name{CommonName: "TestCA"},
+		notBefore, notAfter,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cert1: %v", err)
+	}
+	cert2, err := NewMLDSAPrivateCertificate(
+		pkix.Name{CommonName: "Member2"},
+		pkix.Name{CommonName: "TestCA"},
+		notBefore, notAfter,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cert2: %v", err)
+	}
+	cert3, err := NewMLDSAPrivateCertificate(
+		pkix.Name{CommonName: "Member3"},
+		pkix.Name{CommonName: "TestCA"},
+		notBefore, notAfter,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create cert3: %v", err)
+	}
+
+	// Add members
+	member1, _ := NewMember(cert1.PublicCert(), "us-west", "zone1", "rack1", "192.168.1.1", "", 1)
+	member2, _ := NewMember(cert2.PublicCert(), "us-west", "zone1", "rack2", "192.168.1.2", "", 2)
+	member3, _ := NewMember(cert3.PublicCert(), "us-west", "zone2", "rack1", "192.168.1.3", "", 3)
+
+	store.AddMember(member1)
+	store.AddMember(member2)
+	store.AddMember(member3)
+
+	initialCount := len(store.GetAllMembers())
+	if initialCount != 3 {
+		t.Fatalf("Expected 3 members, got %d", initialCount)
+	}
+
+	// Remove member2
+	removed := store.RemoveMember(member2.hashKey)
+	if !removed {
+		t.Fatal("Expected member2 to be removed")
+	}
+
+	afterRemovalCount := len(store.GetAllMembers())
+	if afterRemovalCount != 2 {
+		t.Fatalf("Expected 2 members after removal, got %d", afterRemovalCount)
+	}
+
+	// Verify member2 is actually gone
+	_, found := store.GetMember(member2.hashKey)
+	if found {
+		t.Fatal("member2 should not be found after removal")
+	}
+
+	// Verify member1 and member3 still exist
+	_, found1 := store.GetMember(member1.hashKey)
+	_, found3 := store.GetMember(member3.hashKey)
+	if !found1 || !found3 {
+		t.Fatal("member1 and member3 should still exist")
+	}
+
+	// Try to remove non-existent member
+	removed = store.RemoveMember("non-existent-key")
+	if removed {
+		t.Fatal("Should not remove non-existent member")
+	}
+
+	// Verify virtual nodes were rebuilt
+	if len(store.vnodes) == 0 {
+		t.Fatal("Virtual nodes should be rebuilt after removal")
+	}
+
+	// Virtual nodes should reflect only 2 members with weights 1 and 3 (total 4 vnodes)
+	expectedVnodes := 1 + 3 // member1.Weight + member3.Weight
+	if len(store.vnodes) != expectedVnodes {
+		t.Fatalf("Expected %d virtual nodes, got %d", expectedVnodes, len(store.vnodes))
+	}
+}
+
 func TestFindMembers(t *testing.T) {
 	store := NewMemberStore()
 
