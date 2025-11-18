@@ -219,6 +219,107 @@ func TestVerifyWithKey(t *testing.T) {
 	}
 }
 
+func TestParseCertificateChain(t *testing.T) {
+	// Create a chain: Intermediate -> Root
+	rootSubject := pkix.Name{CommonName: "Root CA"}
+	rootIssuer := pkix.Name{CommonName: "Root CA"}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	rootPrivCert, err := NewMLDSAPrivateCertificate(rootSubject, rootIssuer, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create root CA: %v", err)
+	}
+
+	interSubject := pkix.Name{CommonName: "Intermediate CA"}
+	interIssuer := rootSubject
+
+	interPrivCert, err := NewMLDSAPrivateCertificate(interSubject, interIssuer, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate CA: %v", err)
+	}
+
+	interPubCert, err := NewMLDSAPublicCertificateFromPublicKey(
+		interSubject, interIssuer, notBefore, notAfter,
+		interPrivCert.PublicCert().GetPublicKey(), rootPrivCert.PrivateKey,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate cert: %v", err)
+	}
+
+	// Create PEM data with both certificates
+	rootPEM, _ := rootPrivCert.PublicCert().MarshalPEM()
+	interPEM, _ := interPubCert.MarshalPEM()
+
+	combinedPEM := append(interPEM, rootPEM...)
+
+	// Parse chain
+	chain, err := ParseCertificateChain(combinedPEM)
+	if err != nil {
+		t.Fatalf("Failed to parse certificate chain: %v", err)
+	}
+
+	if len(chain) != 2 {
+		t.Fatalf("Expected 2 certificates, got %d", len(chain))
+	}
+
+	// Verify chain
+	err = VerifyChain(chain)
+	if err != nil {
+		t.Fatalf("Chain verification failed: %v", err)
+	}
+}
+
+func TestVerifyChain(t *testing.T) {
+	// Create valid chain
+	rootSubject := pkix.Name{CommonName: "Root CA"}
+	rootIssuer := pkix.Name{CommonName: "Root CA"}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	rootPrivCert, err := NewMLDSAPrivateCertificate(rootSubject, rootIssuer, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create root CA: %v", err)
+	}
+
+	interSubject := pkix.Name{CommonName: "Intermediate CA"}
+	interIssuer := rootSubject
+
+	interPrivCert, err := NewMLDSAPrivateCertificate(interSubject, interIssuer, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate CA: %v", err)
+	}
+
+	interPubCert, err := NewMLDSAPublicCertificateFromPublicKey(
+		interSubject, interIssuer, notBefore, notAfter,
+		interPrivCert.PublicCert().GetPublicKey(), rootPrivCert.PrivateKey,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate cert: %v", err)
+	}
+
+	chain := []*MLDSAPublicCertificate{interPubCert, rootPrivCert.PublicCert()}
+
+	// Valid chain
+	err = VerifyChain(chain)
+	if err != nil {
+		t.Fatalf("Valid chain verification failed: %v", err)
+	}
+
+	// Invalid chain (wrong order)
+	invalidChain := []*MLDSAPublicCertificate{rootPrivCert.PublicCert(), interPubCert}
+	err = VerifyChain(invalidChain)
+	if err == nil {
+		t.Fatal("Invalid chain should fail verification")
+	}
+
+	// Empty chain
+	err = VerifyChain([]*MLDSAPublicCertificate{})
+	if err == nil {
+		t.Fatal("Empty chain should fail verification")
+	}
+}
+
 func Example() {
 	// Root CA 생성
 	rootSubject := pkix.Name{CommonName: "Root CA", Organization: []string{"Example Corp"}}
@@ -296,6 +397,26 @@ func Example() {
 		panic("Verification failed")
 	}
 
-	fmt.Println("Certificate chain created and verified successfully")
-	// Output: Certificate chain created and verified successfully
+	// Certificate Chain 생성 및 검증 예시
+	// 체인: Personal -> Intermediate -> Root
+	rootPEM, _ := rootPubCert.MarshalPEM()
+	interPEM, _ := interPubCert.MarshalPEM()
+	personalPEM, _ := personalPubCert.MarshalPEM()
+
+	chainPEM := append(personalPEM, append(interPEM, rootPEM...)...)
+
+	// 체인 파싱
+	chain, err := ParseCertificateChain(chainPEM)
+	if err != nil {
+		panic("Chain parsing failed")
+	}
+
+	// 체인 검증
+	err = VerifyChain(chain)
+	if err != nil {
+		panic("Chain verification failed")
+	}
+
+	fmt.Println("Certificate chain created, parsed, and verified successfully")
+	// Output: Certificate chain created, parsed, and verified successfully
 }

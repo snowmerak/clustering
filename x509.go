@@ -6,6 +6,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -199,6 +200,58 @@ func (c *MLDSAPublicCertificate) VerifyWithKey(signerPub *mldsa87.PublicKey) err
 
 	if !mldsa87.Verify(signerPub, tbsBytes, []byte{}, c.Signature) {
 		return errors.New("signature verification failed")
+	}
+
+	return nil
+}
+
+// ParseCertificateChain parses multiple certificates from PEM data.
+func ParseCertificateChain(pemData []byte) ([]*MLDSAPublicCertificate, error) {
+	var certs []*MLDSAPublicCertificate
+
+	for {
+		block, rest := pem.Decode(pemData)
+		if block == nil {
+			break
+		}
+		if block.Type != "MLDSA CERTIFICATE" {
+			pemData = rest
+			continue
+		}
+
+		cert, err := UnmarshalPEM(pem.EncodeToMemory(block))
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal certificate: %w", err)
+		}
+
+		certs = append(certs, cert)
+		pemData = rest
+	}
+
+	return certs, nil
+}
+
+// VerifyChain verifies the certificate chain.
+func VerifyChain(chain []*MLDSAPublicCertificate) error {
+	if len(chain) == 0 {
+		return errors.New("empty chain")
+	}
+
+	// Root certificate (last in chain) should be self-verifying
+	root := chain[len(chain)-1]
+	if err := root.Verify(); err != nil {
+		return fmt.Errorf("root certificate verification failed: %w", err)
+	}
+
+	// Verify each certificate with the next one
+	for i := 0; i < len(chain)-1; i++ {
+		current := chain[i]
+		issuer := chain[i+1]
+
+		issuerPubKey := issuer.GetPublicKey()
+		if err := current.VerifyWithKey(issuerPubKey); err != nil {
+			return fmt.Errorf("certificate %d verification failed: %w", i, err)
+		}
 	}
 
 	return nil
