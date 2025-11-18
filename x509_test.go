@@ -556,3 +556,53 @@ func TestVerifyWithTrustStore(t *testing.T) {
 		t.Fatal("Expected error when verifying untrusted chain")
 	}
 }
+
+func ExampleTrustStore() {
+	// Create a trust store
+	ts := NewTrustStore()
+
+	// Create root CA certificates
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	rootSubject := pkix.Name{CommonName: "My Root CA"}
+	rootCert, _ := NewMLDSAPrivateCertificate(rootSubject, rootSubject, notBefore, notAfter)
+
+	// Add root CA to trust store
+	ts.AddRootCA(rootCert.PublicCert())
+
+	// Create intermediate certificate signed by root CA
+	interSubject := pkix.Name{CommonName: "Intermediate CA"}
+	interCert, _ := NewMLDSAPublicCertificateFromPublicKey(
+		interSubject,
+		rootSubject,
+		notBefore,
+		notAfter,
+		nil,
+		rootCert.PrivateKey,
+	)
+
+	// Verify certificate chain against trust store
+	chain := []*MLDSAPublicCertificate{interCert}
+	err := ts.VerifyWithTrustStore(chain)
+	if err != nil {
+		fmt.Println("Verification failed")
+	} else {
+		fmt.Println("Certificate chain verified successfully")
+	}
+
+	// Save trust store to file
+	// ts.SaveToFile("truststore.pem")
+
+	// Load trust store from file
+	// ts2 := NewTrustStore()
+	// ts2.LoadFromFile("truststore.pem")
+
+	// Get all root CAs
+	rootCAs := ts.GetRootCAs()
+	fmt.Printf("Trust store contains %d root CA(s)\n", len(rootCAs))
+
+	// Output:
+	// Certificate chain verified successfully
+	// Trust store contains 1 root CA(s)
+}
