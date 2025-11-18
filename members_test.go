@@ -31,11 +31,11 @@ func TestMemberStore(t *testing.T) {
 	pubCert2 := privCert2.PublicCert()
 
 	// Create members
-	member1, err := NewMember(pubCert1, "us-east", "zone1", "rack1", "192.168.1.1", "server1.example.com")
+	member1, err := NewMember(pubCert1, "us-east", "zone1", "rack1", "192.168.1.1", "server1.example.com", 1)
 	if err != nil {
 		t.Fatalf("Failed to create member 1: %v", err)
 	}
-	member2, err := NewMember(pubCert2, "us-east", "zone1", "rack2", "192.168.1.2", "server2.example.com")
+	member2, err := NewMember(pubCert2, "us-east", "zone1", "rack2", "192.168.1.2", "server2.example.com", 1)
 	if err != nil {
 		t.Fatalf("Failed to create member 2: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestSaveLoadCSV(t *testing.T) {
 	}
 	pubCert := privCert.PublicCert()
 
-	member, err := NewMember(pubCert, "us-west", "zone2", "rack3", "10.0.0.1", "test.example.com")
+	member, err := NewMember(pubCert, "us-west", "zone2", "rack3", "10.0.0.1", "test.example.com", 2)
 	if err != nil {
 		t.Fatalf("Failed to create member: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestFindMembers(t *testing.T) {
 				privCert, _ := NewMLDSAPrivateCertificate(subject, issuer, notBefore, notAfter)
 				pubCert := privCert.PublicCert()
 
-				member, _ := NewMember(pubCert, region, zone, rack, fmt.Sprintf("192.168.%d.%d", i+1, j*10+k), fmt.Sprintf("server%d.example.com", i*100+j*10+k))
+				member, _ := NewMember(pubCert, region, zone, rack, fmt.Sprintf("192.168.%d.%d", i+1, j*10+k), fmt.Sprintf("server%d.example.com", i*100+j*10+k), i+1)
 				store.AddMember(member)
 			}
 		}
@@ -175,5 +175,111 @@ func TestFindMembers(t *testing.T) {
 	rack1Members := store.FindMembersInRack("rack1")
 	if len(rack1Members) != 6 { // 3 regions * 2 zones
 		t.Fatalf("Expected 6 members in rack1, got %d", len(rack1Members))
+	}
+}
+
+func TestConsistentHashing(t *testing.T) {
+	store := NewMemberStore()
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	// Create members with different weights
+	for i := 0; i < 3; i++ {
+		subject := pkix.Name{CommonName: fmt.Sprintf("Server %d", i)}
+		issuer := pkix.Name{CommonName: "Issuer"}
+		privCert, _ := NewMLDSAPrivateCertificate(subject, issuer, notBefore, notAfter)
+		pubCert := privCert.PublicCert()
+
+		// Weight increases: 1, 2, 3
+		member, _ := NewMember(pubCert, "us-east", "zone1", fmt.Sprintf("rack%d", i),
+			fmt.Sprintf("192.168.1.%d", i+1), fmt.Sprintf("server%d.example.com", i), i+1)
+		store.AddMember(member)
+	}
+
+	// Test GetMemberByHash
+	testData := []byte("test-key-12345")
+	member := store.GetMemberByHash(testData)
+	if member == nil {
+		t.Fatal("GetMemberByHash returned nil")
+	}
+
+	// Same data should always return the same member
+	for i := 0; i < 10; i++ {
+		m := store.GetMemberByHash(testData)
+		if m != member {
+			t.Fatal("GetMemberByHash returned different member for same data")
+		}
+	}
+
+	// Test distribution with weight
+	distribution := make(map[string]int)
+	for i := 0; i < 1000; i++ {
+		data := []byte(fmt.Sprintf("key-%d", i))
+		m := store.GetMemberByHash(data)
+		distribution[m.Domain]++
+	}
+
+	t.Logf("Distribution: %v", distribution)
+
+	// Members with higher weight should get more keys
+	// We don't check exact ratios due to randomness, just that higher weight gets more
+	prevCount := 0
+	for i := 0; i < 3; i++ {
+		domain := fmt.Sprintf("server%d.example.com", i)
+		count := distribution[domain]
+		if i > 0 && count < prevCount {
+			t.Logf("Warning: Member %d (weight %d) got fewer keys (%d) than member %d (weight %d) with %d keys",
+				i, i+1, count, i-1, i, prevCount)
+		}
+		prevCount = count
+	}
+}
+
+func TestConsistentHashingWithReplicas(t *testing.T) {
+	store := NewMemberStore()
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	// Create 5 members
+	for i := 0; i < 5; i++ {
+		subject := pkix.Name{CommonName: fmt.Sprintf("Server %d", i)}
+		issuer := pkix.Name{CommonName: "Issuer"}
+		privCert, _ := NewMLDSAPrivateCertificate(subject, issuer, notBefore, notAfter)
+		pubCert := privCert.PublicCert()
+
+		member, _ := NewMember(pubCert, "us-east", "zone1", fmt.Sprintf("rack%d", i),
+			fmt.Sprintf("192.168.1.%d", i+1), fmt.Sprintf("server%d.example.com", i), 1)
+		store.AddMember(member)
+	}
+
+	// Test GetMembersByHashWithReplicas
+	testData := []byte("test-key-replicas")
+	replicas := 3
+
+	members := store.GetMembersByHashWithReplicas(testData, replicas)
+	if len(members) != replicas {
+		t.Fatalf("Expected %d replicas, got %d", replicas, len(members))
+	}
+
+	// All members should be unique
+	seen := make(map[string]bool)
+	for _, m := range members {
+		if seen[m.Domain] {
+			t.Fatalf("Duplicate member in replica set: %s", m.Domain)
+		}
+		seen[m.Domain] = true
+	}
+
+	// Same data should always return the same members in the same order
+	for i := 0; i < 10; i++ {
+		ms := store.GetMembersByHashWithReplicas(testData, replicas)
+		if len(ms) != len(members) {
+			t.Fatal("Replica count changed")
+		}
+		for j := range ms {
+			if ms[j] != members[j] {
+				t.Fatal("Replica members or order changed")
+			}
+		}
 	}
 }

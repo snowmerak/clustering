@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 
+	"github.com/zeebo/xxh3"
 	"lukechampine.com/blake3"
 )
 
@@ -17,15 +19,20 @@ type Member struct {
 	Rack        string
 	IP          string
 	Domain      string
+	Weight      int    // weight for consistent hashing (default: 1)
 	hashKey     string // internal Blake3 hash
 	sortKey     string // Region|Zone|Rack|hashKey for sorting
 }
 
 // NewMember creates a new member with certificate and metadata.
-func NewMember(cert *MLDSAPublicCertificate, region, zone, rack, ip, domain string) (*Member, error) {
+func NewMember(cert *MLDSAPublicCertificate, region, zone, rack, ip, domain string, weight int) (*Member, error) {
 	pemData, err := cert.MarshalPEM()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal certificate: %w", err)
+	}
+
+	if weight <= 0 {
+		weight = 1 // default weight
 	}
 
 	hasher := blake3.New(32, nil)
@@ -41,6 +48,7 @@ func NewMember(cert *MLDSAPublicCertificate, region, zone, rack, ip, domain stri
 		Rack:        rack,
 		IP:          ip,
 		Domain:      domain,
+		Weight:      weight,
 		hashKey:     hashKey,
 		sortKey:     sortKey,
 	}, nil
@@ -102,7 +110,7 @@ func (ms *MemberStore) SaveToCSV(writer io.Writer) error {
 	defer csvWriter.Flush()
 
 	// Write header
-	header := []string{"Region", "Zone", "Rack", "IP", "Domain", "HashKey", "PEMData"}
+	header := []string{"Region", "Zone", "Rack", "IP", "Domain", "Weight", "HashKey", "PEMData"}
 	if err := csvWriter.Write(header); err != nil {
 		return fmt.Errorf("failed to write CSV header: %w", err)
 	}
@@ -118,6 +126,7 @@ func (ms *MemberStore) SaveToCSV(writer io.Writer) error {
 			member.Rack,
 			member.IP,
 			member.Domain,
+			strconv.Itoa(member.Weight),
 			member.hashKey,
 			string(pemData),
 		}
@@ -145,16 +154,25 @@ func (ms *MemberStore) LoadFromCSV(reader io.Reader) error {
 
 	ms.members = make([]*Member, 0, len(records))
 	for _, record := range records {
-		if len(record) != 7 {
-			return fmt.Errorf("invalid CSV record: expected 7 fields, got %d", len(record))
+		if len(record) != 8 {
+			return fmt.Errorf("invalid CSV record: expected 8 fields, got %d", len(record))
 		}
 		region := record[0]
 		zone := record[1]
 		rack := record[2]
 		ip := record[3]
 		domain := record[4]
-		hashKey := record[5]
-		pemData := record[6]
+		weightStr := record[5]
+		hashKey := record[6]
+		pemData := record[7]
+
+		weight, err := strconv.Atoi(weightStr)
+		if err != nil {
+			return fmt.Errorf("invalid weight value: %w", err)
+		}
+		if weight <= 0 {
+			weight = 1
+		}
 
 		cert, err := UnmarshalPEM([]byte(pemData))
 		if err != nil {
@@ -179,6 +197,7 @@ func (ms *MemberStore) LoadFromCSV(reader io.Reader) error {
 			Rack:        rack,
 			IP:          ip,
 			Domain:      domain,
+			Weight:      weight,
 			hashKey:     hashKey,
 			sortKey:     sortKey,
 		}
@@ -221,5 +240,106 @@ func (ms *MemberStore) FindMembersInRack(rack string) []*Member {
 			result = append(result, member)
 		}
 	}
+	return result
+}
+
+// virtualNode represents a virtual node in the consistent hashing ring
+type virtualNode struct {
+	hash   uint64
+	member *Member
+}
+
+// GetMemberByHash finds the appropriate member for the given data using consistent hashing with xxh3.
+// Members with higher weights get more virtual nodes, resulting in more data being assigned to them.
+func (ms *MemberStore) GetMemberByHash(data []byte) *Member {
+	if len(ms.members) == 0 {
+		return nil
+	}
+
+	// Create virtual nodes based on member weights
+	var vnodes []virtualNode
+	for _, member := range ms.members {
+		// Create virtual nodes proportional to weight
+		for i := 0; i < member.Weight; i++ {
+			// Combine member hash key with virtual node index
+			vkey := fmt.Sprintf("%s#%d", member.hashKey, i)
+			hash := xxh3.HashString(vkey)
+			vnodes = append(vnodes, virtualNode{
+				hash:   hash,
+				member: member,
+			})
+		}
+	}
+
+	// Sort virtual nodes by hash
+	sort.Slice(vnodes, func(i, j int) bool {
+		return vnodes[i].hash < vnodes[j].hash
+	})
+
+	// Hash the input data
+	dataHash := xxh3.Hash(data)
+
+	// Find the first virtual node with hash >= dataHash (binary search)
+	idx := sort.Search(len(vnodes), func(i int) bool {
+		return vnodes[i].hash >= dataHash
+	})
+
+	// If no node found, wrap around to the first node
+	if idx == len(vnodes) {
+		idx = 0
+	}
+
+	return vnodes[idx].member
+}
+
+// GetMembersByHashWithReplicas finds N members for the given data using consistent hashing.
+// This is useful for replication scenarios where data should be stored on multiple nodes.
+func (ms *MemberStore) GetMembersByHashWithReplicas(data []byte, replicas int) []*Member {
+	if len(ms.members) == 0 || replicas <= 0 {
+		return nil
+	}
+
+	// Create virtual nodes based on member weights
+	var vnodes []virtualNode
+	for _, member := range ms.members {
+		for i := 0; i < member.Weight; i++ {
+			vkey := fmt.Sprintf("%s#%d", member.hashKey, i)
+			hash := xxh3.HashString(vkey)
+			vnodes = append(vnodes, virtualNode{
+				hash:   hash,
+				member: member,
+			})
+		}
+	}
+
+	// Sort virtual nodes by hash
+	sort.Slice(vnodes, func(i, j int) bool {
+		return vnodes[i].hash < vnodes[j].hash
+	})
+
+	// Hash the input data
+	dataHash := xxh3.Hash(data)
+
+	// Find the first virtual node with hash >= dataHash
+	idx := sort.Search(len(vnodes), func(i int) bool {
+		return vnodes[i].hash >= dataHash
+	})
+	if idx == len(vnodes) {
+		idx = 0
+	}
+
+	// Collect unique members starting from idx
+	result := make([]*Member, 0, replicas)
+	seen := make(map[string]bool)
+
+	for len(result) < replicas && len(seen) < len(ms.members) {
+		vnode := vnodes[idx]
+		if !seen[vnode.member.hashKey] {
+			result = append(result, vnode.member)
+			seen[vnode.member.hashKey] = true
+		}
+		idx = (idx + 1) % len(vnodes)
+	}
+
 	return result
 }

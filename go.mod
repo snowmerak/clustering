@@ -5,6 +5,7 @@ go 1.25.4
 require (
 	github.com/cloudflare/circl v1.6.1
 	github.com/xtaci/kcp-go/v5 v5.6.36
+	github.com/zeebo/xxh3 v1.0.2
 	golang.org/x/crypto v0.36.0
 	lukechampine.com/blake3 v1.4.1
 )
