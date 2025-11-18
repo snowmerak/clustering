@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
@@ -255,6 +256,135 @@ func VerifyChain(chain []*MLDSAPublicCertificate) error {
 	}
 
 	return nil
+}
+
+// TrustStore manages a collection of trusted root CA certificates.
+type TrustStore struct {
+	RootCAs []*MLDSAPublicCertificate
+}
+
+// NewTrustStore creates a new empty trust store.
+func NewTrustStore() *TrustStore {
+	return &TrustStore{
+		RootCAs: make([]*MLDSAPublicCertificate, 0),
+	}
+}
+
+// AddRootCA adds a root CA certificate to the trust store.
+func (ts *TrustStore) AddRootCA(cert *MLDSAPublicCertificate) error {
+	// Verify it's a valid self-signed certificate
+	if err := cert.Verify(); err != nil {
+		return fmt.Errorf("invalid root CA certificate: %w", err)
+	}
+
+	// Check if already exists
+	for _, existing := range ts.RootCAs {
+		if existing.TBS.Subject.String() == cert.TBS.Subject.String() &&
+			existing.TBS.SerialNumber.Cmp(cert.TBS.SerialNumber) == 0 {
+			return errors.New("root CA already exists in trust store")
+		}
+	}
+
+	ts.RootCAs = append(ts.RootCAs, cert)
+	return nil
+}
+
+// RemoveRootCA removes a root CA certificate from the trust store by subject and serial number.
+func (ts *TrustStore) RemoveRootCA(subject pkix.Name, serialNumber *big.Int) bool {
+	for i, cert := range ts.RootCAs {
+		if cert.TBS.Subject.String() == subject.String() &&
+			cert.TBS.SerialNumber.Cmp(serialNumber) == 0 {
+			ts.RootCAs = append(ts.RootCAs[:i], ts.RootCAs[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyWithTrustStore verifies a certificate chain against the trust store.
+// The chain should start with the end entity certificate and end with an intermediate CA.
+// The function will try to find a matching root CA in the trust store.
+func (ts *TrustStore) VerifyWithTrustStore(chain []*MLDSAPublicCertificate) error {
+	if len(chain) == 0 {
+		return errors.New("empty certificate chain")
+	}
+
+	// Find the issuer of the last certificate in the chain
+	lastCert := chain[len(chain)-1]
+	issuerName := lastCert.TBS.Issuer.String()
+
+	var rootCA *MLDSAPublicCertificate
+	for _, ca := range ts.RootCAs {
+		if ca.TBS.Subject.String() == issuerName {
+			rootCA = ca
+			break
+		}
+	}
+
+	if rootCA == nil {
+		return errors.New("no trusted root CA found for certificate chain")
+	}
+
+	// Verify the last certificate with the root CA
+	if err := lastCert.VerifyWithKey(rootCA.GetPublicKey()); err != nil {
+		return fmt.Errorf("failed to verify with root CA: %w", err)
+	}
+
+	// Verify the rest of the chain
+	for i := 0; i < len(chain)-1; i++ {
+		current := chain[i]
+		issuer := chain[i+1]
+
+		if err := current.VerifyWithKey(issuer.GetPublicKey()); err != nil {
+			return fmt.Errorf("certificate %d verification failed: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// SaveToFile saves all root CA certificates to a PEM file.
+func (ts *TrustStore) SaveToFile(filename string) error {
+	var pemData []byte
+
+	for _, cert := range ts.RootCAs {
+		certPEM, err := cert.MarshalPEM()
+		if err != nil {
+			return fmt.Errorf("failed to marshal certificate: %w", err)
+		}
+		pemData = append(pemData, certPEM...)
+	}
+
+	return os.WriteFile(filename, pemData, 0644)
+}
+
+// LoadFromFile loads root CA certificates from a PEM file.
+func (ts *TrustStore) LoadFromFile(filename string) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	certs, err := ParseCertificateChain(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse certificate chain: %w", err)
+	}
+
+	// Verify and add each certificate
+	for _, cert := range certs {
+		if err := ts.AddRootCA(cert); err != nil {
+			return fmt.Errorf("failed to add root CA: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetRootCAs returns a copy of all root CA certificates.
+func (ts *TrustStore) GetRootCAs() []*MLDSAPublicCertificate {
+	certs := make([]*MLDSAPublicCertificate, len(ts.RootCAs))
+	copy(certs, ts.RootCAs)
+	return certs
 }
 
 // PublicCert returns the public certificate part of the private certificate.

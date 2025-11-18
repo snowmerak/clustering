@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/x509/pkix"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -419,4 +420,139 @@ func Example() {
 
 	fmt.Println("Certificate chain created, parsed, and verified successfully")
 	// Output: Certificate chain created, parsed, and verified successfully
+}
+
+func TestTrustStore(t *testing.T) {
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	// Create root CA
+	rootSubject := pkix.Name{CommonName: "Root CA"}
+	rootCert, err := NewMLDSAPrivateCertificate(rootSubject, rootSubject, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create root certificate: %v", err)
+	}
+
+	// Create trust store and add root CA
+	ts := NewTrustStore()
+	err = ts.AddRootCA(rootCert.PublicCert())
+	if err != nil {
+		t.Fatalf("Failed to add root CA: %v", err)
+	}
+
+	// Verify root CA is in store
+	rootCAs := ts.GetRootCAs()
+	if len(rootCAs) != 1 {
+		t.Fatalf("Expected 1 root CA, got %d", len(rootCAs))
+	}
+
+	// Try to add duplicate
+	err = ts.AddRootCA(rootCert.PublicCert())
+	if err == nil {
+		t.Fatal("Expected error when adding duplicate root CA")
+	}
+
+	// Remove root CA
+	removed := ts.RemoveRootCA(rootSubject, rootCert.PublicCert().TBS.SerialNumber)
+	if !removed {
+		t.Fatal("Failed to remove root CA")
+	}
+
+	// Verify store is empty
+	rootCAs = ts.GetRootCAs()
+	if len(rootCAs) != 0 {
+		t.Fatalf("Expected 0 root CAs, got %d", len(rootCAs))
+	}
+}
+
+func TestTrustStoreSaveLoad(t *testing.T) {
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	// Create multiple root CAs
+	ts := NewTrustStore()
+
+	for i := 1; i <= 3; i++ {
+		subject := pkix.Name{CommonName: fmt.Sprintf("Root CA %d", i)}
+		cert, err := NewMLDSAPrivateCertificate(subject, subject, notBefore, notAfter)
+		if err != nil {
+			t.Fatalf("Failed to create root certificate %d: %v", i, err)
+		}
+		err = ts.AddRootCA(cert.PublicCert())
+		if err != nil {
+			t.Fatalf("Failed to add root CA %d: %v", i, err)
+		}
+	}
+
+	// Save to file
+	filename := "test_truststore.pem"
+	defer os.Remove(filename)
+
+	err := ts.SaveToFile(filename)
+	if err != nil {
+		t.Fatalf("Failed to save trust store: %v", err)
+	}
+
+	// Load from file
+	ts2 := NewTrustStore()
+	err = ts2.LoadFromFile(filename)
+	if err != nil {
+		t.Fatalf("Failed to load trust store: %v", err)
+	}
+
+	// Verify loaded trust store
+	rootCAs := ts2.GetRootCAs()
+	if len(rootCAs) != 3 {
+		t.Fatalf("Expected 3 root CAs, got %d", len(rootCAs))
+	}
+}
+
+func TestVerifyWithTrustStore(t *testing.T) {
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	// Create root CA
+	rootSubject := pkix.Name{CommonName: "Root CA"}
+	rootCert, err := NewMLDSAPrivateCertificate(rootSubject, rootSubject, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create root certificate: %v", err)
+	}
+
+	// Create intermediate CA signed by root
+	interSubject := pkix.Name{CommonName: "Intermediate CA"}
+	interCert, err := NewMLDSAPublicCertificateFromPublicKey(
+		interSubject,
+		rootSubject,
+		notBefore,
+		notAfter,
+		nil, // Will generate new key pair
+		rootCert.PrivateKey,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate certificate: %v", err)
+	}
+
+	// Create trust store with root CA
+	ts := NewTrustStore()
+	err = ts.AddRootCA(rootCert.PublicCert())
+	if err != nil {
+		t.Fatalf("Failed to add root CA: %v", err)
+	}
+
+	// Verify chain with trust store
+	chain := []*MLDSAPublicCertificate{interCert}
+	err = ts.VerifyWithTrustStore(chain)
+	if err != nil {
+		t.Fatalf("Failed to verify with trust store: %v", err)
+	}
+
+	// Test with untrusted chain
+	untrustedRoot := pkix.Name{CommonName: "Untrusted Root"}
+	untrustedCert, _ := NewMLDSAPrivateCertificate(untrustedRoot, untrustedRoot, notBefore, notAfter)
+	untrustedChain := []*MLDSAPublicCertificate{untrustedCert.PublicCert()}
+
+	err = ts.VerifyWithTrustStore(untrustedChain)
+	if err == nil {
+		t.Fatal("Expected error when verifying untrusted chain")
+	}
 }
