@@ -181,3 +181,39 @@ func TestGetPublicKey(t *testing.T) {
 		t.Fatal("Public key verification failed")
 	}
 }
+
+func TestVerifyWithKey(t *testing.T) {
+	// Root CA
+	rootSubject := pkix.Name{CommonName: "Root CA"}
+	rootIssuer := pkix.Name{CommonName: "Root CA"}
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	rootPrivCert, err := NewMLDSAPrivateCertificate(rootSubject, rootIssuer, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create root CA: %v", err)
+	}
+	rootPubKey := rootPrivCert.PublicCert().GetPublicKey()
+
+	// Subordinate certificate signed by root
+	subSubject := pkix.Name{CommonName: "Sub Cert"}
+	subIssuer := rootSubject
+
+	subCert, err := NewMLDSAPublicCertificateFromPublicKey(subSubject, subIssuer, notBefore, notAfter, rootPubKey, rootPrivCert.PrivateKey)
+	if err != nil {
+		t.Fatalf("Failed to create subordinate certificate: %v", err)
+	}
+
+	// Verify subordinate cert with root's public key
+	err = subCert.VerifyWithKey(rootPubKey)
+	if err != nil {
+		t.Fatalf("Verification with root key failed: %v", err)
+	}
+
+	// Test with wrong key (should fail)
+	wrongPub, _, _ := mldsa87.GenerateKey(rand.Reader)
+	err = subCert.VerifyWithKey(wrongPub)
+	if err == nil {
+		t.Fatal("Verification should fail with wrong key")
+	}
+}

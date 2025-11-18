@@ -190,6 +190,20 @@ func (c *MLDSAPublicCertificate) VerifyData(data []byte, sig []byte) bool {
 	return mldsa87.Verify(pub, data, []byte{}, sig)
 }
 
+// VerifyWithKey verifies the certificate's signature using the provided public key (e.g., parent CA's key).
+func (c *MLDSAPublicCertificate) VerifyWithKey(signerPub *mldsa87.PublicKey) error {
+	tbsBytes, err := asn1.Marshal(c.TBS)
+	if err != nil {
+		return err
+	}
+
+	if !mldsa87.Verify(signerPub, tbsBytes, []byte{}, c.Signature) {
+		return errors.New("signature verification failed")
+	}
+
+	return nil
+}
+
 // PublicCert returns the public certificate part of the private certificate.
 func (c *MLDSAPrivateCertificate) PublicCert() *MLDSAPublicCertificate {
 	return &c.PublicCertificate
