@@ -210,15 +210,21 @@ func TestRemoveMember(t *testing.T) {
 		t.Fatal("Should not remove non-existent member")
 	}
 
-	// Verify virtual nodes were rebuilt
-	if len(store.vnodes) == 0 {
-		t.Fatal("Virtual nodes should be rebuilt after removal")
+	// Verify hash ranges were rebuilt
+	if len(store.hashRanges) == 0 {
+		t.Fatal("Hash ranges should be rebuilt after removal")
 	}
 
-	// Virtual nodes should reflect only 2 members with weights 1 and 3 (total 4 vnodes)
-	expectedVnodes := 1 + 3 // member1.Weight + member3.Weight
-	if len(store.vnodes) != expectedVnodes {
-		t.Fatalf("Expected %d virtual nodes, got %d", expectedVnodes, len(store.vnodes))
+	// Hash ranges should reflect only 2 members
+	expectedRanges := 2
+	if len(store.hashRanges) != expectedRanges {
+		t.Fatalf("Expected %d hash ranges, got %d", expectedRanges, len(store.hashRanges))
+	}
+
+	// Total weight should be 1 + 3 = 4
+	expectedWeight := 1 + 3
+	if store.totalWeight != expectedWeight {
+		t.Fatalf("Expected total weight %d, got %d", expectedWeight, store.totalWeight)
 	}
 }
 

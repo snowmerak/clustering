@@ -4,7 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strconv"
 
 	"github.com/zeebo/xxh3"
@@ -66,8 +66,15 @@ func (m *Member) GetSortKey() string {
 
 // MemberStore manages members stored as sorted CSV.
 type MemberStore struct {
-	members []*Member
-	vnodes  []virtualNode // cached virtual nodes for consistent hashing
+	members     []*Member
+	hashRanges  []hashRange // hash ranges for consistent hashing
+	totalWeight int         // sum of all member weights
+}
+
+// hashRange represents a member's range on the consistent hash ring.
+type hashRange struct {
+	startHash uint64  // starting point of this range
+	member    *Member // member owning this range
 }
 
 // NewMemberStore creates a new member store.
@@ -77,11 +84,11 @@ func NewMemberStore() *MemberStore {
 	}
 }
 
-// AddMember adds a member to the store and keeps it sorted.
+// AddMember adds a member to the store, keeping it sorted.
 func (ms *MemberStore) AddMember(member *Member) {
 	ms.members = append(ms.members, member)
 	ms.sortMembers()
-	ms.rebuildVirtualNodes()
+	ms.rebuildHashRanges()
 }
 
 // GetMember retrieves a member by its hash key.
@@ -94,12 +101,12 @@ func (ms *MemberStore) GetMember(hashKey string) (*Member, bool) {
 	return nil, false
 }
 
-// RemoveMember removes a member from the store and rebuilds virtual nodes.
+// RemoveMember removes a member from the store and rebuilds hash ranges.
 func (ms *MemberStore) RemoveMember(hashKey string) bool {
 	for i, member := range ms.members {
 		if member.hashKey == hashKey {
 			ms.members = append(ms.members[:i], ms.members[i+1:]...)
-			ms.rebuildVirtualNodes()
+			ms.rebuildHashRanges()
 			return true
 		}
 	}
@@ -113,8 +120,14 @@ func (ms *MemberStore) GetAllMembers() []*Member {
 
 // sortMembers sorts members by Region > Zone > Rack > Hash Key.
 func (ms *MemberStore) sortMembers() {
-	sort.Slice(ms.members, func(i, j int) bool {
-		return ms.members[i].sortKey < ms.members[j].sortKey
+	slices.SortFunc(ms.members, func(a, b *Member) int {
+		if a.sortKey < b.sortKey {
+			return -1
+		}
+		if a.sortKey > b.sortKey {
+			return 1
+		}
+		return 0
 	})
 }
 
@@ -221,7 +234,7 @@ func (ms *MemberStore) LoadFromCSV(reader io.Reader) error {
 
 	// Ensure sorted
 	ms.sortMembers()
-	ms.rebuildVirtualNodes()
+	ms.rebuildHashRanges()
 	return nil
 }
 
@@ -258,86 +271,111 @@ func (ms *MemberStore) FindMembersInRack(rack string) []*Member {
 	return result
 }
 
-// virtualNode represents a virtual node in the consistent hashing ring
-type virtualNode struct {
-	hash   uint64
-	member *Member
-}
-
-// rebuildVirtualNodes rebuilds the virtual nodes list based on current members.
-func (ms *MemberStore) rebuildVirtualNodes() {
-	ms.vnodes = nil
-	for _, member := range ms.members {
-		// Create virtual nodes proportional to weight
-		for i := 0; i < member.Weight; i++ {
-			// Combine member hash key with virtual node index
-			vkey := fmt.Sprintf("%s#%d", member.hashKey, i)
-			hash := xxh3.HashString(vkey)
-			ms.vnodes = append(ms.vnodes, virtualNode{
-				hash:   hash,
-				member: member,
-			})
-		}
+// rebuildHashRanges builds hash ranges for consistent hashing.
+// Divides the hash space (0 to 2^64-1) into ranges proportional to member weights.
+func (ms *MemberStore) rebuildHashRanges() {
+	if len(ms.members) == 0 {
+		ms.hashRanges = nil
+		ms.totalWeight = 0
+		return
 	}
 
-	// Sort virtual nodes by hash
-	sort.Slice(ms.vnodes, func(i, j int) bool {
-		return ms.vnodes[i].hash < ms.vnodes[j].hash
-	})
+	// Calculate total weight
+	ms.totalWeight = 0
+	for _, member := range ms.members {
+		ms.totalWeight += member.Weight
+	}
+
+	// Build hash ranges
+	ms.hashRanges = make([]hashRange, 0, len(ms.members))
+	var currentHash uint64 = 0
+
+	for i, member := range ms.members {
+		ms.hashRanges = append(ms.hashRanges, hashRange{
+			startHash: currentHash,
+			member:    member,
+		})
+
+		// Calculate range size based on weight proportion
+		if i < len(ms.members)-1 {
+			// For all but the last member, calculate proportional range
+			rangeSize := (^uint64(0) / uint64(ms.totalWeight)) * uint64(member.Weight)
+			currentHash += rangeSize
+		}
+		// Last member gets the remaining range to wrap around to 0
+	}
 }
 
 // GetMemberByHash finds the appropriate member for the given data using consistent hashing with xxh3.
-// Members with higher weights get more virtual nodes, resulting in more data being assigned to them.
+// Uses hash ranges instead of virtual nodes for better memory efficiency.
 func (ms *MemberStore) GetMemberByHash(data []byte) *Member {
-	if len(ms.vnodes) == 0 {
+	if len(ms.hashRanges) == 0 {
 		return nil
 	}
 
 	// Hash the input data
 	dataHash := xxh3.Hash(data)
 
-	// Find the first virtual node with hash >= dataHash (binary search)
-	idx := sort.Search(len(ms.vnodes), func(i int) bool {
-		return ms.vnodes[i].hash >= dataHash
+	// Find the range containing this hash using binary search
+	idx, found := slices.BinarySearchFunc(ms.hashRanges, dataHash, func(hr hashRange, target uint64) int {
+		if target < hr.startHash {
+			return 1 // target is before this range
+		}
+		return -1 // keep searching
 	})
 
-	// If no node found, wrap around to the first node
-	if idx == len(ms.vnodes) {
-		idx = 0
+	if !found {
+		// BinarySearchFunc returns the insertion point
+		// We want the range just before the insertion point
+		if idx > 0 {
+			idx--
+		} else {
+			// Wrap around to the last range
+			idx = len(ms.hashRanges) - 1
+		}
 	}
 
-	return ms.vnodes[idx].member
+	return ms.hashRanges[idx].member
 }
 
 // GetMembersByHashWithReplicas finds N members for the given data using consistent hashing.
 // This is useful for replication scenarios where data should be stored on multiple nodes.
 func (ms *MemberStore) GetMembersByHashWithReplicas(data []byte, replicas int) []*Member {
-	if len(ms.vnodes) == 0 || replicas <= 0 {
+	if len(ms.hashRanges) == 0 || replicas <= 0 {
 		return nil
 	}
 
 	// Hash the input data
 	dataHash := xxh3.Hash(data)
 
-	// Find the first virtual node with hash >= dataHash
-	idx := sort.Search(len(ms.vnodes), func(i int) bool {
-		return ms.vnodes[i].hash >= dataHash
+	// Find the range containing this hash
+	idx, found := slices.BinarySearchFunc(ms.hashRanges, dataHash, func(hr hashRange, target uint64) int {
+		if target < hr.startHash {
+			return 1
+		}
+		return -1
 	})
-	if idx == len(ms.vnodes) {
-		idx = 0
+
+	if !found {
+		if idx > 0 {
+			idx--
+		} else {
+			idx = len(ms.hashRanges) - 1
+		}
 	}
 
-	// Collect unique members starting from idx
+	// Collect unique members by walking the ring
 	result := make([]*Member, 0, replicas)
 	seen := make(map[string]bool)
 
-	for len(result) < replicas && len(seen) < len(ms.members) {
-		vnode := ms.vnodes[idx]
-		if !seen[vnode.member.hashKey] {
-			result = append(result, vnode.member)
-			seen[vnode.member.hashKey] = true
+	for i := 0; len(result) < replicas && len(result) < len(ms.members); i++ {
+		currentIdx := (idx + i) % len(ms.hashRanges)
+		member := ms.hashRanges[currentIdx].member
+
+		if !seen[member.hashKey] {
+			result = append(result, member)
+			seen[member.hashKey] = true
 		}
-		idx = (idx + 1) % len(ms.vnodes)
 	}
 
 	return result
