@@ -1,6 +1,7 @@
 package clustering
 
 import (
+	"context"
 	"crypto/mlkem"
 	"crypto/x509/pkix"
 	"errors"
@@ -42,8 +43,11 @@ func TestSecureConnectionHandshake(t *testing.T) {
 		}
 		defer listener.Close()
 
+		// Signal ready
+		close(serverReady)
+
 		// Accept connection (handshake happens automatically)
-		conn, err := listener.Accept()
+		conn, err := listener.Accept(context.Background())
 		if err != nil {
 			serverDone <- err
 			return
@@ -57,16 +61,19 @@ func TestSecureConnectionHandshake(t *testing.T) {
 			return
 		}
 
-		// Signal ready and wait for test to complete
-		close(serverReady)
+		// Wait for test to complete
 		<-serverDone // Wait for signal to close
 	}()
 
-	// Give server time to start
-	time.Sleep(100 * time.Millisecond)
+	// Wait for server to be ready
+	select {
+	case <-serverReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Server start timeout")
+	}
 
 	// Client connects (handshake happens automatically)
-	conn, err := DialSecureConnection(serverAddr, clientCert)
+	conn, err := DialSecureConnection(context.Background(), serverAddr, clientCert)
 	if err != nil {
 		t.Fatalf("Failed to dial secure connection: %v", err)
 	}
@@ -78,18 +85,8 @@ func TestSecureConnectionHandshake(t *testing.T) {
 		t.Fatal("Remote certificate is nil")
 	}
 
-	// Wait for server to be ready
-	select {
-	case <-serverReady:
-		// Success
-		serverDone <- nil // Signal server to close
-	case err := <-serverDone:
-		if err != nil {
-			t.Fatalf("Server error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Server timeout")
-	}
+	// Success
+	serverDone <- nil // Signal server to close
 }
 
 func TestSecureConnectionSendReceive(t *testing.T) {
@@ -133,7 +130,7 @@ func TestSecureConnectionSendReceive(t *testing.T) {
 		close(serverReady)
 
 		t.Log("[Server] Waiting for connection...")
-		conn, err := listener.Accept()
+		conn, err := listener.Accept(context.Background())
 		if err != nil {
 			t.Logf("[Server] Accept error: %v", err)
 			serverDone <- err
@@ -170,7 +167,9 @@ func TestSecureConnectionSendReceive(t *testing.T) {
 		t.Log("[Server] Sent")
 
 		serverDone <- nil
-	}() // Wait for server to start listening
+	}()
+
+	// Wait for server to start listening
 	select {
 	case <-serverReady:
 		// Server is listening
@@ -180,18 +179,12 @@ func TestSecureConnectionSendReceive(t *testing.T) {
 		t.Fatal("Server listen timeout")
 	}
 
-	// Give server time to be fully ready (important for KCP initialization)
-	time.Sleep(200 * time.Millisecond)
-
 	// Client
-	conn, err := DialSecureConnection(serverAddr, clientCert)
+	conn, err := DialSecureConnection(context.Background(), serverAddr, clientCert)
 	if err != nil {
 		t.Fatalf("Failed to dial secure connection: %v", err)
 	}
 	defer conn.Close()
-
-	// Give the connection time to fully establish
-	time.Sleep(100 * time.Millisecond)
 
 	// Send message to server
 	message := []byte("Hello from client!")

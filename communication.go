@@ -1,6 +1,7 @@
 package clustering
 
 import (
+	"context"
 	"crypto/cipher"
 	"crypto/mlkem"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"github.com/xtaci/kcp-go/v5"
@@ -59,29 +61,24 @@ func NewSecureConnectionWithTrustStore(conn *kcp.UDPSession, localCert *MLDSAPri
 }
 
 // Handshake performs the certificate-based handshake and key exchange
-func (sc *SecureConnection) Handshake() error {
+func (sc *SecureConnection) Handshake(ctx context.Context) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	if sc.isServer {
-		return sc.serverHandshake()
+	if deadline, ok := ctx.Deadline(); ok {
+		sc.conn.SetDeadline(deadline)
+		defer sc.conn.SetDeadline(time.Time{})
 	}
-	return sc.clientHandshake()
+
+	if sc.isServer {
+		return sc.serverHandshake(ctx)
+	}
+	return sc.clientHandshake(ctx)
 }
 
 // clientHandshake performs the client-side handshake
-func (sc *SecureConnection) clientHandshake() error {
-	// Send local certificate
-	certPEM, err := sc.localCert.PublicCert().MarshalPEM()
-	if err != nil {
-		return fmt.Errorf("failed to marshal certificate: %w", err)
-	}
-
-	if err := sc.sendMessage(certPEM); err != nil {
-		return fmt.Errorf("failed to send certificate: %w", err)
-	}
-
-	// Receive server certificate
+func (sc *SecureConnection) clientHandshake(ctx context.Context) error {
+	// Receive server certificate first
 	serverCertPEM, err := sc.receiveMessage()
 	if err != nil {
 		return fmt.Errorf("failed to receive server certificate: %w", err)
@@ -99,6 +96,16 @@ func (sc *SecureConnection) clientHandshake() error {
 
 	sc.remoteCert = serverCert
 
+	// Send local certificate
+	certPEM, err := sc.localCert.PublicCert().MarshalPEM()
+	if err != nil {
+		return fmt.Errorf("failed to marshal certificate: %w", err)
+	}
+
+	if err := sc.sendMessage(certPEM); err != nil {
+		return fmt.Errorf("failed to send certificate: %w", err)
+	}
+
 	// Perform ML-KEM key exchange
 	if err := sc.performKeyExchange(); err != nil {
 		return fmt.Errorf("key exchange failed: %w", err)
@@ -108,7 +115,17 @@ func (sc *SecureConnection) clientHandshake() error {
 }
 
 // serverHandshake performs the server-side handshake
-func (sc *SecureConnection) serverHandshake() error {
+func (sc *SecureConnection) serverHandshake(ctx context.Context) error {
+	// Send server certificate first
+	certPEM, err := sc.localCert.PublicCert().MarshalPEM()
+	if err != nil {
+		return fmt.Errorf("failed to marshal certificate: %w", err)
+	}
+
+	if err := sc.sendMessage(certPEM); err != nil {
+		return fmt.Errorf("failed to send certificate: %w", err)
+	}
+
 	// Receive client certificate
 	clientCertPEM, err := sc.receiveMessage()
 	if err != nil {
@@ -126,16 +143,6 @@ func (sc *SecureConnection) serverHandshake() error {
 	}
 
 	sc.remoteCert = clientCert
-
-	// Send server certificate
-	certPEM, err := sc.localCert.PublicCert().MarshalPEM()
-	if err != nil {
-		return fmt.Errorf("failed to marshal certificate: %w", err)
-	}
-
-	if err := sc.sendMessage(certPEM); err != nil {
-		return fmt.Errorf("failed to send certificate: %w", err)
-	}
 
 	// Perform ML-KEM key exchange
 	if err := sc.performKeyExchange(); err != nil {
@@ -227,7 +234,9 @@ func (sc *SecureConnection) clientKeyExchange() error {
 	}
 
 	sc.sharedKey = sharedSecret
-	sc.deriveKeys()
+	if err := sc.deriveKeys(); err != nil {
+		return fmt.Errorf("failed to derive keys: %w", err)
+	}
 
 	return nil
 }
@@ -276,13 +285,15 @@ func (sc *SecureConnection) serverKeyExchange() error {
 	}
 
 	sc.sharedKey = sharedSecret
-	sc.deriveKeys()
+	if err := sc.deriveKeys(); err != nil {
+		return fmt.Errorf("failed to derive keys: %w", err)
+	}
 
 	return nil
 }
 
 // deriveKeys derives encryption and MAC keys from the shared secret
-func (sc *SecureConnection) deriveKeys() {
+func (sc *SecureConnection) deriveKeys() error {
 	// Use BLAKE3 to derive XChaCha20-Poly1305 key (32 bytes)
 	hash := blake3.New(32, nil)
 	hash.Write(sc.sharedKey)
@@ -291,9 +302,10 @@ func (sc *SecureConnection) deriveKeys() {
 	// Create XChaCha20-Poly1305 AEAD cipher
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
-		panic(fmt.Sprintf("failed to create AEAD cipher: %v", err))
+		return fmt.Errorf("failed to create AEAD cipher: %w", err)
 	}
 	sc.aead = aead
+	return nil
 }
 
 // sendMessage sends a message with a length prefix
@@ -393,7 +405,7 @@ func (sc *SecureConnection) GetRemoteCertificate() *MLDSAPublicCertificate {
 }
 
 // DialSecureConnection establishes a secure connection to the given address
-func DialSecureConnection(addr string, localCert *MLDSAPrivateCertificate) (*SecureConnection, error) {
+func DialSecureConnection(ctx context.Context, addr string, localCert *MLDSAPrivateCertificate) (*SecureConnection, error) {
 	conn, err := kcp.Dial(addr)
 	if err != nil {
 		return nil, err
@@ -406,7 +418,7 @@ func DialSecureConnection(addr string, localCert *MLDSAPrivateCertificate) (*Sec
 	}
 
 	sc := NewSecureConnection(kcpConn, localCert, false)
-	if err := sc.Handshake(); err != nil {
+	if err := sc.Handshake(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -415,7 +427,7 @@ func DialSecureConnection(addr string, localCert *MLDSAPrivateCertificate) (*Sec
 }
 
 // DialSecureConnectionWithMembers establishes a secure connection with member store verification
-func DialSecureConnectionWithMembers(addr string, localCert *MLDSAPrivateCertificate, memberStore *MemberStore) (*SecureConnection, error) {
+func DialSecureConnectionWithMembers(ctx context.Context, addr string, localCert *MLDSAPrivateCertificate, memberStore *MemberStore) (*SecureConnection, error) {
 	conn, err := kcp.Dial(addr)
 	if err != nil {
 		return nil, err
@@ -428,7 +440,7 @@ func DialSecureConnectionWithMembers(addr string, localCert *MLDSAPrivateCertifi
 	}
 
 	sc := NewSecureConnectionWithMembers(kcpConn, localCert, false, memberStore)
-	if err := sc.Handshake(); err != nil {
+	if err := sc.Handshake(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -437,7 +449,7 @@ func DialSecureConnectionWithMembers(addr string, localCert *MLDSAPrivateCertifi
 }
 
 // DialSecureConnectionWithTrustStore establishes a secure connection with trust store verification
-func DialSecureConnectionWithTrustStore(addr string, localCert *MLDSAPrivateCertificate, trustStore *TrustStore) (*SecureConnection, error) {
+func DialSecureConnectionWithTrustStore(ctx context.Context, addr string, localCert *MLDSAPrivateCertificate, trustStore *TrustStore) (*SecureConnection, error) {
 	conn, err := kcp.Dial(addr)
 	if err != nil {
 		return nil, err
@@ -450,7 +462,7 @@ func DialSecureConnectionWithTrustStore(addr string, localCert *MLDSAPrivateCert
 	}
 
 	sc := NewSecureConnectionWithTrustStore(kcpConn, localCert, false, trustStore)
-	if err := sc.Handshake(); err != nil {
+	if err := sc.Handshake(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -526,7 +538,7 @@ type SecureListener struct {
 }
 
 // Accept accepts a new secure connection
-func (sl *SecureListener) Accept() (*SecureConnection, error) {
+func (sl *SecureListener) Accept(ctx context.Context) (*SecureConnection, error) {
 	conn, err := sl.listener.Accept()
 	if err != nil {
 		return nil, err
@@ -548,7 +560,7 @@ func (sl *SecureListener) Accept() (*SecureConnection, error) {
 		sc = NewSecureConnection(kcpConn, sl.localCert, true)
 	}
 
-	if err := sc.Handshake(); err != nil {
+	if err := sc.Handshake(ctx); err != nil {
 		conn.Close()
 		return nil, err
 	}
