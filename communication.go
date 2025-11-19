@@ -78,6 +78,12 @@ func (sc *SecureConnection) Handshake(ctx context.Context) error {
 
 // clientHandshake performs the client-side handshake
 func (sc *SecureConnection) clientHandshake(ctx context.Context) error {
+	// Send Hello message to initiate connection and wake up server's Accept
+	helloMsg := []byte("Hello, I am in v1.0")
+	if err := sc.sendMessage(helloMsg); err != nil {
+		return fmt.Errorf("failed to send hello message: %w", err)
+	}
+
 	// Receive server certificate first
 	serverCertPEM, err := sc.receiveMessage()
 	if err != nil {
@@ -116,6 +122,14 @@ func (sc *SecureConnection) clientHandshake(ctx context.Context) error {
 
 // serverHandshake performs the server-side handshake
 func (sc *SecureConnection) serverHandshake(ctx context.Context) error {
+	// Receive Hello message
+	helloMsg, err := sc.receiveMessage()
+	if err != nil {
+		return fmt.Errorf("failed to receive hello message: %w", err)
+	}
+	// TODO: Verify hello message version if needed
+	_ = helloMsg
+
 	// Send server certificate first
 	certPEM, err := sc.localCert.PublicCert().MarshalPEM()
 	if err != nil {

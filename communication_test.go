@@ -73,7 +73,9 @@ func TestSecureConnectionHandshake(t *testing.T) {
 	}
 
 	// Client connects (handshake happens automatically)
-	conn, err := DialSecureConnection(context.Background(), serverAddr, clientCert)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := DialSecureConnection(ctx, serverAddr, clientCert)
 	if err != nil {
 		t.Fatalf("Failed to dial secure connection: %v", err)
 	}
