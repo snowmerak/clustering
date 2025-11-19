@@ -413,3 +413,35 @@ func (c *MLDSAPrivateCertificate) SignData(data []byte) ([]byte, error) {
 	}
 	return sig, nil
 }
+
+// MarshalPrivateKeyPEM marshals the private key to PEM format.
+func (c *MLDSAPrivateCertificate) MarshalPrivateKeyPEM() ([]byte, error) {
+	var privBytes [mldsa87.PrivateKeySize]byte
+	c.PrivateKey.Pack(&privBytes)
+
+	pemBlock := &pem.Block{
+		Type:  "MLDSA PRIVATE KEY",
+		Bytes: privBytes[:],
+	}
+
+	return pem.EncodeToMemory(pemBlock), nil
+}
+
+// UnmarshalPrivateKeyPEM unmarshals a private key from PEM format.
+func UnmarshalPrivateKeyPEM(data []byte) (*mldsa87.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "MLDSA PRIVATE KEY" {
+		return nil, errors.New("invalid PEM block")
+	}
+
+	if len(block.Bytes) != mldsa87.PrivateKeySize {
+		return nil, errors.New("invalid private key size")
+	}
+
+	var priv mldsa87.PrivateKey
+	var privBytes [mldsa87.PrivateKeySize]byte
+	copy(privBytes[:], block.Bytes)
+	priv.Unpack(&privBytes)
+
+	return &priv, nil
+}
