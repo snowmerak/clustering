@@ -576,12 +576,13 @@ func ExampleTrustStore() {
 
 	// Create intermediate certificate signed by root CA
 	interSubject := pkix.Name{CommonName: "Intermediate CA"}
+	interPubKey, _, _ := mldsa87.GenerateKey(nil)
 	interCert, _ := NewMLDSAPublicCertificateFromPublicKey(
 		interSubject,
 		rootSubject,
 		notBefore,
 		notAfter,
-		nil,
+		interPubKey,
 		rootCert.PrivateKey,
 	)
 

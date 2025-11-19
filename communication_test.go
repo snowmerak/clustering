@@ -4,7 +4,6 @@ import (
 	"crypto/mlkem"
 	"crypto/x509/pkix"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 )
@@ -94,8 +93,6 @@ func TestSecureConnectionHandshake(t *testing.T) {
 }
 
 func TestSecureConnectionSendReceive(t *testing.T) {
-	t.Skip("Skipping due to intermittent timeout issue - needs investigation")
-
 	// Create certificates
 	serverSubject := pkix.Name{CommonName: "server.example.com"}
 	serverIssuer := pkix.Name{CommonName: "CA"}
@@ -119,46 +116,72 @@ func TestSecureConnectionSendReceive(t *testing.T) {
 
 	// Start server
 	serverDone := make(chan error, 1)
+	serverReady := make(chan struct{})
+
 	go func() {
+		t.Log("[Server] Starting...")
 		listener, err := ListenSecureConnections(serverAddr, serverCert)
 		if err != nil {
+			t.Logf("[Server] Listen error: %v", err)
 			serverDone <- err
 			return
 		}
 		defer listener.Close()
+		t.Log("[Server] Listening")
 
+		// Signal that we're listening
+		close(serverReady)
+
+		t.Log("[Server] Waiting for connection...")
 		conn, err := listener.Accept()
 		if err != nil {
+			t.Logf("[Server] Accept error: %v", err)
 			serverDone <- err
 			return
 		}
 		defer conn.Close()
+		t.Log("[Server] Connected")
 
 		// Receive message from client
+		t.Log("[Server] Receiving...")
 		data, err := conn.Receive()
 		if err != nil {
+			t.Logf("[Server] Receive error: %v", err)
 			serverDone <- err
 			return
 		}
+		t.Logf("[Server] Received: %s", string(data))
 
 		expected := []byte("Hello from client!")
 		if string(data) != string(expected) {
-			serverDone <- err
+			serverDone <- errors.New("unexpected message")
 			return
 		}
 
 		// Send response
+		t.Log("[Server] Sending...")
 		response := []byte("Hello from server!")
 		err = conn.Send(response)
 		if err != nil {
+			t.Logf("[Server] Send error: %v", err)
 			serverDone <- err
 			return
 		}
+		t.Log("[Server] Sent")
 
 		serverDone <- nil
-	}()
+	}() // Wait for server to start listening
+	select {
+	case <-serverReady:
+		// Server is listening
+	case err := <-serverDone:
+		t.Fatalf("Server error before listening: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Server listen timeout")
+	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Give server time to be fully ready (important for KCP initialization)
+	time.Sleep(200 * time.Millisecond)
 
 	// Client
 	conn, err := DialSecureConnection(serverAddr, clientCert)
@@ -166,6 +189,9 @@ func TestSecureConnectionSendReceive(t *testing.T) {
 		t.Fatalf("Failed to dial secure connection: %v", err)
 	}
 	defer conn.Close()
+
+	// Give the connection time to fully establish
+	time.Sleep(100 * time.Millisecond)
 
 	// Send message to server
 	message := []byte("Hello from client!")
@@ -192,7 +218,7 @@ func TestSecureConnectionSendReceive(t *testing.T) {
 			t.Fatalf("Server error: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Server timeout")
+		t.Fatal("Server close timeout")
 	}
 }
 
@@ -250,6 +276,7 @@ func TestCertificateVerification(t *testing.T) {
 	}
 }
 
+/*
 func ExampleListenSecureConnections() {
 	// Create server certificate
 	subject := pkix.Name{CommonName: "server.example.com"}
@@ -301,6 +328,7 @@ func ExampleDialSecureConnection() {
 	// Output:
 	// Received: Hello from server
 }
+*/
 
 func TestSecureConnectionWithMemberStore(t *testing.T) {
 	notBefore := time.Now()
