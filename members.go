@@ -101,6 +101,21 @@ func (ms *MemberStore) GetMember(hashKey string) (*Member, bool) {
 	return nil, false
 }
 
+// GetMemberByCertificate retrieves a member by comparing certificate.
+// Returns the member if the certificate hash matches.
+func (ms *MemberStore) GetMemberByCertificate(cert *MLDSAPublicCertificate) (*Member, bool) {
+	pemData, err := cert.MarshalPEM()
+	if err != nil {
+		return nil, false
+	}
+
+	hasher := blake3.New(32, nil)
+	hasher.Write(pemData)
+	hashKey := fmt.Sprintf("%x", hasher.Sum(nil))
+
+	return ms.GetMember(hashKey)
+}
+
 // RemoveMember removes a member from the store and rebuilds hash ranges.
 func (ms *MemberStore) RemoveMember(hashKey string) bool {
 	for i, member := range ms.members {
