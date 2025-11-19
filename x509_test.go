@@ -520,19 +520,22 @@ func TestVerifyWithTrustStore(t *testing.T) {
 
 	// Create intermediate CA signed by root
 	interSubject := pkix.Name{CommonName: "Intermediate CA"}
+	interPrivCert, err := NewMLDSAPrivateCertificate(interSubject, rootSubject, notBefore, notAfter)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate private certificate: %v", err)
+	}
+
 	interCert, err := NewMLDSAPublicCertificateFromPublicKey(
 		interSubject,
 		rootSubject,
 		notBefore,
 		notAfter,
-		nil, // Will generate new key pair
+		interPrivCert.PublicCert().GetPublicKey(),
 		rootCert.PrivateKey,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create intermediate certificate: %v", err)
-	}
-
-	// Create trust store with root CA
+	} // Create trust store with root CA
 	ts := NewTrustStore()
 	err = ts.AddRootCA(rootCert.PublicCert())
 	if err != nil {

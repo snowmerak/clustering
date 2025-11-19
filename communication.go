@@ -18,21 +18,43 @@ import (
 
 // SecureConnection represents a secure connection using KCP with ML-DSA certificates and ML-KEM key exchange
 type SecureConnection struct {
-	conn       *kcp.UDPSession
-	localCert  *MLDSAPrivateCertificate
-	remoteCert *MLDSAPublicCertificate
-	sharedKey  []byte
-	aead       cipher.AEAD
-	isServer   bool
-	mu         sync.RWMutex
+	conn        *kcp.UDPSession
+	localCert   *MLDSAPrivateCertificate
+	remoteCert  *MLDSAPublicCertificate
+	sharedKey   []byte
+	aead        cipher.AEAD
+	isServer    bool
+	memberStore *MemberStore // Optional: if set, only accept connections from members
+	trustStore  *TrustStore  // Optional: if set (and memberStore is nil), verify against trust store
+	mu          sync.RWMutex
 }
 
-// NewSecureConnection creates a new secure connection
+// NewSecureConnection creates a new secure connection with basic self-signed verification
 func NewSecureConnection(conn *kcp.UDPSession, localCert *MLDSAPrivateCertificate, isServer bool) *SecureConnection {
 	return &SecureConnection{
 		conn:      conn,
 		localCert: localCert,
 		isServer:  isServer,
+	}
+}
+
+// NewSecureConnectionWithMembers creates a secure connection that only accepts members from the store
+func NewSecureConnectionWithMembers(conn *kcp.UDPSession, localCert *MLDSAPrivateCertificate, isServer bool, memberStore *MemberStore) *SecureConnection {
+	return &SecureConnection{
+		conn:        conn,
+		localCert:   localCert,
+		isServer:    isServer,
+		memberStore: memberStore,
+	}
+}
+
+// NewSecureConnectionWithTrustStore creates a secure connection that verifies against a trust store
+func NewSecureConnectionWithTrustStore(conn *kcp.UDPSession, localCert *MLDSAPrivateCertificate, isServer bool, trustStore *TrustStore) *SecureConnection {
+	return &SecureConnection{
+		conn:       conn,
+		localCert:  localCert,
+		isServer:   isServer,
+		trustStore: trustStore,
 	}
 }
 
@@ -70,8 +92,8 @@ func (sc *SecureConnection) clientHandshake() error {
 		return fmt.Errorf("failed to unmarshal server certificate: %w", err)
 	}
 
-	// Verify server certificate (in a real implementation, you'd verify against a trusted CA)
-	if err := serverCert.Verify(); err != nil {
+	// Verify server certificate using tiered authentication
+	if err := sc.verifyCertificate(serverCert); err != nil {
 		return fmt.Errorf("server certificate verification failed: %w", err)
 	}
 
@@ -98,8 +120,8 @@ func (sc *SecureConnection) serverHandshake() error {
 		return fmt.Errorf("failed to unmarshal client certificate: %w", err)
 	}
 
-	// Verify client certificate
-	if err := clientCert.Verify(); err != nil {
+	// Verify client certificate using tiered authentication
+	if err := sc.verifyCertificate(clientCert); err != nil {
 		return fmt.Errorf("client certificate verification failed: %w", err)
 	}
 
@@ -118,6 +140,43 @@ func (sc *SecureConnection) serverHandshake() error {
 	// Perform ML-KEM key exchange
 	if err := sc.performKeyExchange(); err != nil {
 		return fmt.Errorf("key exchange failed: %w", err)
+	}
+
+	return nil
+}
+
+// verifyCertificate performs tiered certificate verification:
+// 1. If memberStore is set, verify the certificate is from a known member
+// 2. Else if trustStore is set, verify the certificate chain against trusted CAs
+// 3. Else verify self-signed certificate only
+func (sc *SecureConnection) verifyCertificate(cert *MLDSAPublicCertificate) error {
+	// First priority: MemberStore - most restrictive
+	if sc.memberStore != nil {
+		_, found := sc.memberStore.GetMemberByCertificate(cert)
+		if !found {
+			return errors.New("certificate not found in member store")
+		}
+		// Still verify the certificate signature is valid
+		if err := cert.Verify(); err != nil {
+			return fmt.Errorf("member certificate signature invalid: %w", err)
+		}
+		return nil
+	}
+
+	// Second priority: TrustStore - verify against trusted CAs
+	if sc.trustStore != nil {
+		// For a single certificate, treat it as a chain of one
+		// If it's self-signed, it should match a root CA
+		// If it's not self-signed, we'd need the full chain
+		if err := sc.trustStore.VerifyWithTrustStore([]*MLDSAPublicCertificate{cert}); err != nil {
+			return fmt.Errorf("trust store verification failed: %w", err)
+		}
+		return nil
+	}
+
+	// Fallback: Basic self-signed verification
+	if err := cert.Verify(); err != nil {
+		return fmt.Errorf("self-signed verification failed: %w", err)
 	}
 
 	return nil
@@ -355,6 +414,50 @@ func DialSecureConnection(addr string, localCert *MLDSAPrivateCertificate) (*Sec
 	return sc, nil
 }
 
+// DialSecureConnectionWithMembers establishes a secure connection with member store verification
+func DialSecureConnectionWithMembers(addr string, localCert *MLDSAPrivateCertificate, memberStore *MemberStore) (*SecureConnection, error) {
+	conn, err := kcp.Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	kcpConn, ok := conn.(*kcp.UDPSession)
+	if !ok {
+		conn.Close()
+		return nil, errors.New("invalid connection type")
+	}
+
+	sc := NewSecureConnectionWithMembers(kcpConn, localCert, false, memberStore)
+	if err := sc.Handshake(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return sc, nil
+}
+
+// DialSecureConnectionWithTrustStore establishes a secure connection with trust store verification
+func DialSecureConnectionWithTrustStore(addr string, localCert *MLDSAPrivateCertificate, trustStore *TrustStore) (*SecureConnection, error) {
+	conn, err := kcp.Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	kcpConn, ok := conn.(*kcp.UDPSession)
+	if !ok {
+		conn.Close()
+		return nil, errors.New("invalid connection type")
+	}
+
+	sc := NewSecureConnectionWithTrustStore(kcpConn, localCert, false, trustStore)
+	if err := sc.Handshake(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	return sc, nil
+}
+
 // ListenSecureConnections listens for secure connections on the given address
 func ListenSecureConnections(addr string, localCert *MLDSAPrivateCertificate) (*SecureListener, error) {
 	listener, err := kcp.Listen(addr)
@@ -374,10 +477,52 @@ func ListenSecureConnections(addr string, localCert *MLDSAPrivateCertificate) (*
 	}, nil
 }
 
+// ListenSecureConnectionsWithMembers listens for secure connections with member store verification
+func ListenSecureConnectionsWithMembers(addr string, localCert *MLDSAPrivateCertificate, memberStore *MemberStore) (*SecureListener, error) {
+	listener, err := kcp.Listen(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	kcpListener, ok := listener.(*kcp.Listener)
+	if !ok {
+		listener.Close()
+		return nil, errors.New("invalid listener type")
+	}
+
+	return &SecureListener{
+		listener:    kcpListener,
+		localCert:   localCert,
+		memberStore: memberStore,
+	}, nil
+}
+
+// ListenSecureConnectionsWithTrustStore listens for secure connections with trust store verification
+func ListenSecureConnectionsWithTrustStore(addr string, localCert *MLDSAPrivateCertificate, trustStore *TrustStore) (*SecureListener, error) {
+	listener, err := kcp.Listen(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	kcpListener, ok := listener.(*kcp.Listener)
+	if !ok {
+		listener.Close()
+		return nil, errors.New("invalid listener type")
+	}
+
+	return &SecureListener{
+		listener:   kcpListener,
+		localCert:  localCert,
+		trustStore: trustStore,
+	}, nil
+}
+
 // SecureListener represents a listener for secure connections
 type SecureListener struct {
-	listener  *kcp.Listener
-	localCert *MLDSAPrivateCertificate
+	listener    *kcp.Listener
+	localCert   *MLDSAPrivateCertificate
+	memberStore *MemberStore
+	trustStore  *TrustStore
 }
 
 // Accept accepts a new secure connection
@@ -393,7 +538,16 @@ func (sl *SecureListener) Accept() (*SecureConnection, error) {
 		return nil, errors.New("invalid connection type")
 	}
 
-	sc := NewSecureConnection(kcpConn, sl.localCert, true)
+	// Create connection with appropriate authentication mode
+	var sc *SecureConnection
+	if sl.memberStore != nil {
+		sc = NewSecureConnectionWithMembers(kcpConn, sl.localCert, true, sl.memberStore)
+	} else if sl.trustStore != nil {
+		sc = NewSecureConnectionWithTrustStore(kcpConn, sl.localCert, true, sl.trustStore)
+	} else {
+		sc = NewSecureConnection(kcpConn, sl.localCert, true)
+	}
+
 	if err := sc.Handshake(); err != nil {
 		conn.Close()
 		return nil, err
