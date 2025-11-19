@@ -45,9 +45,15 @@ func NewMLDSAPublicCertificateFromPublicKey(subject, issuer pkix.Name, notBefore
 	var pubBytes [mldsa87.PublicKeySize]byte
 	pub.Pack(&pubBytes)
 
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
 	tbs := MLDSATBS{
 		Version:      0,
-		SerialNumber: big.NewInt(1), // In production, use a random serial number
+		SerialNumber: serialNumber,
 		Subject:      subject,
 		Issuer:       issuer,
 		NotBefore:    notBefore,
@@ -89,9 +95,15 @@ func NewMLDSAPrivateCertificate(subject, issuer pkix.Name, notBefore, notAfter t
 	var pubBytes [mldsa87.PublicKeySize]byte
 	pub.Pack(&pubBytes)
 
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
 	tbs := MLDSATBS{
 		Version:      0,
-		SerialNumber: big.NewInt(1), // In production, use a random serial number
+		SerialNumber: serialNumber,
 		Subject:      subject,
 		Issuer:       issuer,
 		NotBefore:    notBefore,
